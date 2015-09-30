@@ -1,0 +1,716 @@
+#!/usr/bin/python
+#
+# Test program to verify Kerberos5 functionality
+#
+# Copyright (C) 2015 Olaf Kirch <okir@suse.de>
+#
+# WARNING: Running this test will set the hostname of at least
+# the "server" node to "server.krb5testing.suse.de".
+#
+
+import sys
+import suselog
+import twopence
+import susetest
+import time
+
+journal = None
+kdc = None
+server = None
+client = None
+
+realm		= "KRB5TESTING.SUSE.DE"
+dbpassword	= "lalla"
+admin_password	= "imtheoperator"
+user_password	= "pocketcalculator"
+
+def setup():
+	global server, client, kdc, journal
+
+	config = susetest.Config("krb5")
+
+	journal = config.journal
+	journal.beginGroup("setup")
+
+	kdc = config.target("kdc")
+	server = config.target("server")
+	client = config.target("client")
+
+	if not server.ipaddr:
+		journal.fatal("No IP address set for server");
+	if not client.ipaddr:
+		journal.fatal("No IP address set for client");
+	if not kdc.ipaddr:
+		journal.fatal("No IP address set for kdc");
+
+	twopence.setDebugLevel(0)
+
+	publish_all_hostnames()
+
+##################################################################
+# Define a host name on all of the three nodes
+##################################################################
+def publish_hostname(addr, fqdn):
+	journal.beginTest("publish hostname %s" % fqdn)
+	for node in [kdc, server, client]:
+		if not node.addHostEntry(addr, fqdn):
+			journal.fatal("Cannot publish hostname")
+	journal.success()
+
+def publish_all_hostnames():
+	publish_hostname(kdc.ipaddr, "kdc.krb5testing.suse.de")
+	publish_hostname(server.ipaddr, "server.krb5testing.suse.de")
+	publish_hostname(client.ipaddr, "client.krb5testing.suse.de")
+
+	journal.beginTest("Setting server hostname")
+	if not server.run("hostname server"):
+		journal.fatal("Unable to set server's hostname")
+
+##################################################################
+# Check whether the OS uses systemd
+##################################################################
+def has_systemd(node):
+	if not hasattr(node, "__has_systemd"):
+		node.__has_systemd = False
+		if node.run("test -x /usr/bin/systemctl"):
+			node.__has_systemd = True
+	return node.__has_systemd
+
+##################################################################
+# Enable and start service
+##################################################################
+def start_service(node, name):
+	journal.beginTest("Starting service %s" % name)
+	if has_systemd(node):
+		if not node.runOrFail("systemctl enable %s.service" % name) or \
+		   not node.runOrFail("systemctl start %s.service" % name):
+			return False
+	else:
+		if not node.runOrFail("chkconfig %s on" % name) or \
+		   not node.runOrFail("rc%s start" % name):
+			return False
+
+	return True
+
+##################################################################
+# Locate a binary on a given node
+##################################################################
+def krb5_getpath(node, command):
+	if not hasattr(node, '__path_cache'):
+		node.__path_cache = dict()
+
+	cache = node.__path_cache
+	if command in cache:
+		return cache[command]
+
+	journal.info("Trying to locate command %s on node %s" % (command, node.name))
+	for dir in ['/usr/lib/mit/bin', '/usr/lib/mit/sbin']:
+		cmdpath = dir + "/" + command
+		if node.run("test -x " + cmdpath, quiet = True):
+			cache[command] = cmdpath
+			return cmdpath
+
+	journal.warning("Could not find command %s, falling back to default PATH")
+	cache[command] = command
+	return command
+
+##################################################################
+# Initialize KDC
+##################################################################
+def init_server(node):
+	global server, client;
+
+	journal.beginGroup("kdc-init", "Initialize Kerberos KDC")
+
+	data = '''
+[kdcdefaults]
+        kdc_ports = 750,88
+
+[realms]
+        KRB5TESTING.SUSE.DE = {
+        }
+
+[logging]
+    kdc = FILE:/var/log/krb5/krb5kdc.log
+    admin_server = FILE:/var/log/krb5/kadmind.log
+    default = SYSLOG:NOTICE:DAEMON
+'''
+
+	journal.beginTest("uploading kdc.conf")
+	if not node.sendbuffer("/etc/kdc.conf", data):
+		journal.fatal("failed to upload kdc.conf")
+
+	journal.beginTest("initializing database")
+	journal.info("Cleaning up from previous run")
+	if not node.run("rm -f /var/lib/kerberos/krb5kdc/principal*"):
+		journal.warning("Duh, unable to clean up?!")
+	kdb5_util_cmd = krb5_getpath(node, "kdb5_util")
+	if not node.run("%s create -r %s -s -P %s" % (kdb5_util_cmd, realm, dbpassword)):
+		journal.fatal("failed to initialize kdc database")
+
+	journal.beginTest("Adding principal testuser/admin")
+	kadmin = KadminSession(node, local = True)
+	if not kadmin.add_principal("testuser/admin", admin_password):
+		journal.failure("unable to add admin principal")
+	kadmin = None
+
+	acl_data = "testuser/admin@%s *" % realm
+	if not node.sendbuffer("/var/lib/kerberos/krb5kdc/kadm5.acl", acl_data):
+		journal.fatal("unable to upload kadm5 acl file")
+
+	start_service(node, "krb5kdc")
+	start_service(node, "kadmind")
+
+	journal.finishGroup()
+
+##################################################################
+# Initialize a host as Kerberos client
+##################################################################
+def init_client(node):
+
+	journal.beginGroup("%s-init" % node.name, "Initialize %s node" % node.name)
+
+	data = '''
+[libdefaults]
+	default_realm = KRB5TESTING.SUSE.DE
+
+[realms]
+	KRB5TESTING.SUSE.DE = {
+		kdc = kdc.krb5testing.suse.de
+		admin_server = kdc.krb5testing.suse.de
+	}
+
+[logging]
+    kdc = FILE:/var/log/krb5/krb5kdc.log
+    admin_server = FILE:/var/log/krb5/kadmind.log
+    default = SYSLOG:NOTICE:DAEMON
+'''
+
+	journal.beginTest("uploading krb5.conf")
+	if not node.sendbuffer("/etc/krb5.conf", data):
+		journal.fatal("failed to upload krb5.conf")
+
+	journal.finishGroup()
+
+##################################################################
+# Test kadmin functionality
+# The following only works with ssh, because it
+# needs a /run/user/<uid> directory for testuser, and that is
+# only created if the session has been set up via pam_systemd
+##################################################################
+def krb5_test_kadmin(node):
+
+	journal.beginGroup("kadmin", "Testing remote kadmin functionality")
+
+	journal.beginTest("Adding principal testuser")
+	kadmin = KadminSession(node, user = "testuser", password = admin_password)
+	if not kadmin.add_principal("testuser", user_password):
+		journal.failure("unable to add principal testuser")
+
+	journal.beginTest("Adding principal okir")
+	kadmin = KadminSession(node, user = "testuser", password = admin_password)
+	if not kadmin.add_principal("okir", user_password):
+		journal.failure("unable to add principal okir")
+
+	# FIXME: test listprinc
+	# FIXME: test cpw
+
+	journal.beginTest("Deleting principal okir")
+	kadmin = KadminSession(node, user = "testuser", password = admin_password)
+	if not kadmin.del_principal("okir", user_password):
+		journal.failure("unable to delete principal okir")
+
+	journal.finishGroup()
+
+##################################################################
+# Test basic user utilities
+##################################################################
+def krb5_test_basic(node):
+
+	journal.beginGroup("basic", "Testing basic user functionality")
+
+	journal.beginTest("Trying to obtain ticket for principal testuser")
+	if not krb5_create_cc(node, 'testuser', user_password):
+		journal.failure("kinit failed")
+
+	journal.beginTest("Using kinit with wrong password")
+	if krb5_create_cc(node, 'testuser', 'badpassword'):
+		journal.failure("kinit should have returned error")
+
+	# FIXME: test v5passwd
+
+	krb5_verify_cc(node, 'testuser')
+
+	journal.beginTest("Verify that kdestroy clears the cred cache")
+	node.run("kdestroy", user = 'testuser')
+	if node.run("klist -s"):
+		journal.failure("klist says we still have valid tickets")
+	else:
+		journal.info("Okay, klist says it can't find the cred cache any longer")
+		journal.success()
+
+	journal.finishGroup()
+
+##################################################################
+# Test SSH with kerberos authentication
+##################################################################
+def krb5_test_ssh():
+
+	server_hostname = "server.krb5testing.suse.de"
+	server_principal = "host/%s" % server_hostname
+
+	# These options will be set on the server in order to enable GSSAPI
+	ssh_server_gssapi_options = {
+		'GSSAPIAuthentication' : 'yes',
+		'GSSAPICleanupCredentials' : 'yes'
+	}
+	# These options will be set in the client user's .ssh/config in order to enable GSSAPI
+	ssh_client_gssapi_options = {
+		'StrictHostKeyChecking' : 'no',
+		'GSSAPIAuthentication' : 'yes',
+	}
+	# These options will be set in the client user's .ssh/config in order to enable delegation
+	ssh_client_deleg_options = {
+		'GSSAPIDelegateCredentials' : 'yes'
+	}
+
+	journal.beginGroup("ssh", "Test SSH with kerberos authentication")
+
+	journal.beginTest("Check whether testuser can SSH to server")
+	if client.run("ssh -o BatchMode=yes %s true" % server_hostname, user = 'testuser'):
+		journal.info("Oops, testuser was able to log into server?")
+		journal.failure("testuser should not be able to ssh to server without password")
+	else:
+		journal.info("Good, testuser should not be able to ssh")
+		journal.success()
+
+	journal.beginTest("Creating ssh server principal")
+	kadmin = KadminSession(kdc, local = True)
+	if not kadmin.add_principal_randkey(server_principal):
+		journal.failure("unable to add ssh principal")
+	del kadmin
+
+	journal.beginTest("Add ssh principal's key to keytab on server")
+	journal.info("Cleaning up keytab")
+	server.run("rm -f /etc/krb5.keytab")
+	kadmin = KadminSession(server, user = "testuser", password = admin_password)
+	if not kadmin.keytab_add(server_principal):
+		journal.failure("unable to extract key for %s" % server_principal)
+	del kadmin
+
+	# Verify that /etc/krb5.keytab exists and is not readable
+	# Use ktutil to verify that we extracted the key
+	# Use k5srvutil list
+	journal.beginTest("Verify that the key was added to server's keytab")
+	status = server.run("k5srvutil list")
+	if not status:
+		journal.failure("k5srvutil returned error")
+	elif not server_principal in str(status.stdout):
+		journal.failure("keytab listing does not seem to contain %s" % server_principal)
+	else:
+		journal.success()
+
+	journal.beginTest("Enabling GSSAPI on SSH server")
+	if not ssh_edit_config(server, "/etc/ssh/sshd_config", ssh_server_gssapi_options):
+		journal.failure("Unable to change ssh server settings")
+		return False
+	if not server.run("rcsshd restart"):
+		journal.failure("Unable to restart sshd")
+		return False
+	journal.success()
+
+	journal.beginTest("Enabling GSSAPI on SSH client")
+	client.run("mkdir -p .ssh; rm -f .ssh/config", user = 'testuser')
+	if not ssh_edit_config(client, ".ssh/config", ssh_client_gssapi_options, user = 'testuser'):
+		journal.failure("Unable to change ssh client settings")
+		return False
+
+	journal.beginTest("Obtain a new (forwardable) ticket for testuser")
+	if not krb5_create_cc(client, 'testuser', user_password, forwarding = True):
+		journal.failure("kinit failed")
+		return False
+
+	journal.beginTest("Verify that testuser can log in")
+	if not client.run("ssh -o BatchMode=yes %s true" % server.name, user = 'testuser'):
+		journal.failure("unable to ssh to server")
+
+	journal.beginTest("Verify that delegation works")
+	if not ssh_edit_config(client, ".ssh/config", ssh_client_deleg_options, user = 'testuser'):
+		journal.failure("Unable to change ssh client settings")
+
+	status = client.run("ssh -o BatchMode=yes %s klist -s" % server.name, user = 'testuser')
+	if not status:
+		journal.failure("Ticket forwarding seems to fail")
+
+	# FIXME: verify that the forwarded ticket works?
+
+	journal.beginTest("Cleanup")
+	client.runOrFail("rm -f .ssh/config; kdestroy", user = 'testuser')
+
+	journal.finishGroup()
+
+
+def ssh_edit_config(node, filename, options, user = 'root'):
+	journal.info("Setting SSH options in %s" % filename)
+	for kwd in options.keys():
+		journal.info("  %s = %s" % (kwd, options[kwd]))
+
+	if node.run("test -f %s" % filename, user = user):
+		data = node.recvbuffer(filename, user = user)
+		if data == None:
+			return False
+	else:
+		journal.info("%s: %s does not exist yet" % (node.name, filename))
+		data = ""
+
+	out = []
+	hide_options = dict()
+	for l in str(data).splitlines():
+		# I don't know of a simpler way to split by white space
+		# AND equals
+		tmp = l.lstrip("# \t").replace('=', ' ')
+		words = l.split()
+
+		kwd = None
+		if words and words[0] == '#':
+			del words[0]
+		if words:
+			kwd = words[0]
+
+		if kwd in hide_options:
+			# We've seen this option already, do not
+			# allow another occurrence
+			continue
+
+		if kwd in options:
+			# Ah, we want to set this option!
+			l = "%s %s" % (kwd, options[kwd])
+			hide_options[kwd] = True
+			del options[kwd]
+		out.append(l)
+	
+	# If we have any options that did not exist in the config file,
+	# dump them out at the end.
+	for kwd in options.keys():
+		out.append("%s %s" % (kwd, options[kwd]))
+
+	data = "\n".join(out) + "\n"
+	return node.sendbuffer(filename, data, user = user)
+
+##################################################################
+# Utility functions
+##################################################################
+def krb5_create_cc(node, principal, password, forwarding = False):
+	kinit = KinitSession(node, user = principal, forwarding = forwarding)
+	return kinit.login(password)
+
+def krb5_verify_cc(node, principal):
+	journal.beginTest("Verify that klist shows a TGT (ticket granting ticket)")
+	if not node.run("klist -s", user = principal):
+		journal.failure("No TGT - klist could not find any valid tickets")
+		return False
+
+	journal.info("Okay, klist says we have a cred cache with valid ticket(s)");
+
+	status = node.run("klist", user = principal)
+	if status == None:
+		# Something failed big time; we didn't even get a Status object
+		journal.error("unable to run klist")
+		return False
+
+	# We know that klist returns a non-zero exit status
+	if status.code != 0:
+		journal.warning("Ignoring exit status %d from klist" % status.code)
+
+	tgtname = "krbtgt/%s@%s" % (realm, realm)
+	if not tgtname in str(status.stdout):
+		journal.failure("No TGT - could not find %s in klist output" % tgtname)
+		return False
+
+	journal.success()
+	return False
+
+##################################################################
+# Chat classes for Kerberos utils
+##################################################################
+class Chat:
+	def __init__(self, node, command, user = None, timeout = 60):
+		if not user:
+			user = node.defaultUser
+			if not user:
+				user = "root"
+
+		self.command = command
+		self.user = user
+		self.timeout = timeout
+		self.chat_timeout = 10
+		self.chatlog = bytearray()
+
+		journal.info(node.name + ": " + self.command)
+		self.chat = node.chat(self.command, user = self.user, timeout = self.timeout)
+
+	def __del__(self):
+		self.wait()
+
+		if self.chatlog:
+			journal.info("%s exited with status %d" % (self.command, self.status.code))
+			journal.info("-- chat log --");
+			journal.info(str(self.chatlog))
+			journal.info("-- end --")
+			self.chatlog = None
+
+	def wait(self):
+		if self.chat:
+			self.status = self.chat.wait()
+			self.chat = None
+		return self.status
+
+	def expect(self, string):
+		#print "Expect \"%s\", timeout = %u" % (string, self.chat_timeout)
+		#self.chatlog += "<EXPECT \"%s\">" % string;
+		if not self.chat.expect(string, self.chat_timeout):
+			journal.failure("kadmin: Chat timeout while waiting for string \"%s\"" % string)
+			return False
+
+		#journal.info("Okay")
+		self.chatlog += self.chat.consumed
+		return True
+
+	def send(self, string):
+		#print "Send \"%s\"" % string
+		self.chatlog += "<SEND \"%s\">" % string
+		self.chat.send(string)
+	
+	def sendline(self, string):
+		#print "Send \"%s\\n\"" % string
+		self.chatlog += "<SEND \"%s\\n\">" % string
+		self.chat.send(string + "\n")
+
+	def chat_failed(self):
+		journal.failure("Timeout while talking to kadmin command")
+		return False
+
+class KinitSession(Chat):
+	def __init__(self, node, user = None, timeout = 60, forwarding = False):
+		command = "kinit"
+		if forwarding:
+			command += " -f"
+		Chat.__init__(self, node, command, user, timeout)
+
+	def login(self, password):
+		#print "Authenticating"
+		# Password for <principal>:
+		if not self.expect("Password") or not self.expect(":"):
+			return False
+
+		self.sendline(password)
+
+		return self.wait()
+
+class KadminSession(Chat):
+	def __init__(self, node, local = False, user = None, password = None, timeout = 60):
+		if local:
+			command = krb5_getpath(node, "kadmin.local")
+			prompt = "kadmin.local:"
+			password = None
+		else:
+			command = krb5_getpath(node, "kadmin")
+			prompt = "kadmin:"
+			if not password:
+				password = "NotProvided"
+
+		# Specify the principal on the command. Alternatively, we could
+		# run as that user, but then we would not be able to write to
+		# the log file or eg a keytab file
+		if user:
+			command += " -p " + user + "/admin"
+
+		Chat.__init__(self, node, command, timeout = timeout)
+
+		self.prompt = prompt
+		self.password = password
+
+	def __del__(self):
+		if self.chat:
+			self.quit()
+
+		Chat.__del__(self)
+
+	def login(self):
+		password = self.password
+		if not password:
+			return True
+
+		self.password = None
+
+		#print "Authenticating"
+		# Password for <principal>:
+		if not self.expect("Password") or not self.expect(":"):
+			return False
+
+		self.sendline(password)
+		return True
+
+	def add_principal(self, name, password):
+		journal.info("Adding principal %s" % name)
+
+		if not self.login():
+			return False
+
+		if not self.expect(self.prompt):
+			return False
+		self.sendline("ank %s" % name)
+
+		# Enter password for principal "...":
+		if not self.expect("Enter password") or not self.expect(":"):
+			return False
+		self.sendline(password)
+
+		# Re-enter password for principal "...":
+		if not self.expect("Re-enter password") or not self.expect(":"):
+			return False
+		self.sendline(password)
+
+		# Principal "..." created
+		if not self.expect("Principal") or not self.expect("created"):
+			return False
+
+		journal.info("Successfully created principal %s" % name)
+		return True
+
+	def add_principal_randkey(self, name):
+		journal.info("Adding principal %s with random key" % name)
+
+		if not self.login():
+			return False
+
+		if not self.expect(self.prompt):
+			return False
+		self.sendline("ank -randkey %s" % name)
+
+		# Principal "..." created
+		if not self.expect("Principal") or not self.expect("created"):
+			return False
+
+		journal.info("Successfully created principal %s" % name)
+		return True
+
+	def keytab_add(self, name):
+		journal.info("Adding %s's key to keytab" % name)
+
+		if not self.login():
+			return False
+
+		if not self.expect(self.prompt):
+			return False
+		self.sendline("ktadd %s" % name)
+
+		# Entry for principal ... with ... added to keytab FILE:/etc/krb5.keytab.
+		if not self.expect("Entry for principal") or not self.expect("added to keytab"):
+			return False
+
+		journal.info("Successfully extracted key for principal %s" % name)
+		return True
+
+	def del_principal(self, name, password):
+		journal.info("Deleting principal %s" % name)
+
+		if not self.login():
+			return False
+
+		if not self.expect(self.prompt):
+			return False
+		self.sendline("delprinc %s" % name)
+
+		# Are you sure you want to delete the principal "..."? (yes/no):
+		if not self.expect("Are you sure you want to delete") or not self.expect(":"):
+			return False
+		self.sendline("yes")
+
+		# Principal "..." deleted.
+		if not self.expect("Principal") or not self.expect("deleted"):
+			return False
+
+		journal.info("Successfully deleted principal %s" % name)
+		return True
+
+	def quit(self):
+		if not self.login():
+			return False
+
+		if not self.expect(self.prompt):
+			return False
+		self.sendline("quit")
+
+		# cheating for now. We really want chat.wait() to
+		# update chat.consumed with the remaining data printed
+		# by the command.
+		self.chatlog += " quit\n"
+
+		return self.wait()
+
+def main():
+	setup()
+	init_server(kdc)
+	init_client(server)
+	init_client(client)
+
+	krb5_test_kadmin(client)
+
+	# Test kinit, klist and related utilities
+	krb5_test_basic(client)
+
+	krb5_test_ssh()
+
+main()
+journal.writeReport()
+
+
+# # As testuser:
+# kinit
+# # chat
+# Password for testuser@KRB5TESTING.SUSE.DE:
+# 	pass
+# 
+# v5passwd
+# 	-> TBD
+# 
+# klist
+# # search for line with principal krbtgt/KRB5TESTING.SUSE.DE@KRB5TESTING.SUSE.DE
+# 
+# # Create NFS server principal
+# kadmin.local:
+# 	ank -randkey host/server.krb5testing.suse.de
+# Principal .* created.
+# kadmin.local:
+# 	quit
+# 
+# # Extract principal on NFS server
+# kadmin:
+# 	ktadd host/client.susetest.de
+# kadmin.local:
+# 	quit
+# 
+# # Verify that /etc/krb5.keytab exists and is not readable
+# 
+# 
+# # ssh with krb
+# - on the kdc: ank -randkey host/servername
+# - on the server: ktadd host/servername
+# - on the server: edit sshd_config
+# 	GSSAPIAuthentication yes
+# 	GSSAPICleanupCredentials yes
+# 	restart sshd
+# - on the client
+# 	kinit
+# 	put this into ~/.ssh/config:
+# 		StrictHostKeyChecking=no
+# 		GSSAPIAuthentication=yes
+# 	ssh -v servername true
+# - on the client
+# 	put this into ~/.ssh/config:
+# 		StrictHostKeyChecking=no
+# 		GSSAPIAuthentication=yes
+# 		GSSAPIDelegateCredentials=yes
+# 	ssh servername klist
+# 	check output to ensue that it contains a line from krbtgt/KRB5TESTING.SUSE.DE
