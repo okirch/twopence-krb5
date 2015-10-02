@@ -2,4 +2,4 @@ all:
 	: ;
 
 install:
-	/usr/lib/susetest/twopence-install kerberos nodes run $(DESTDIR)
+	/usr/lib/susetest/twopence-install krb5 nodes run $(DESTDIR)
