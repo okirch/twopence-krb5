@@ -2,12 +2,12 @@
 node		kdc
 install		krb5-client
 install		krb5-server
-#install	krb5-appl-servers
+# install	krb5-appl-servers
 
 node		client
 install		krb5-client
-#install	krb5-appl-servers
+# install	krb5-appl-servers
 
 node		server
 install		krb5-client
-#install	krb5-appl-servers
+# install	krb5-appl-servers
