@@ -140,6 +140,8 @@ def init_server(node):
 	if not node.sendbuffer("/etc/kdc.conf", data):
 		journal.fatal("failed to upload kdc.conf")
 
+	krb5_upload_krb5dotconf(node)
+
 	journal.beginTest("initializing database")
 	journal.info("Cleaning up from previous run")
 	if not node.run("rm -f /var/lib/kerberos/krb5kdc/principal*"):
@@ -176,6 +178,17 @@ def init_client(node):
 
 	journal.beginGroup("%s-init" % node.name, "Initialize %s node" % node.name)
 
+	krb5_upload_krb5dotconf(node)
+
+	journal.finishGroup()
+
+
+
+##################################################################
+# Upload krb5.conf (same/same for kdc and clients)
+##################################################################
+def krb5_upload_krb5dotconf(node):
+
 	data = '''
 [libdefaults]
 	default_realm = KRB5TESTING.SUSE.DE
@@ -196,7 +209,6 @@ def init_client(node):
 	if not node.sendbuffer("/etc/krb5.conf", data):
 		journal.fatal("failed to upload krb5.conf")
 
-	journal.finishGroup()
 
 ##################################################################
 # Test kadmin functionality
@@ -516,7 +528,7 @@ class KinitSession(Chat):
 class KadminSession(Chat):
 	def __init__(self, node, local = False, user = None, password = None, timeout = 60):
 		if local:
-			command = krb5_getpath(node, "kadmin.local") + " -r " + test_realm
+			command = krb5_getpath(node, "kadmin.local")
 			prompt = "kadmin.local:"
 			password = None
 		else:
