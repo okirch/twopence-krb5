@@ -212,19 +212,11 @@ def init_node_common(node):
 	# systemd trashes the /run/user/%{uid} directory whenever
 	# the SSH session ends. Which happens all the time, because
 	# twopence will create a new session for every command.
-	journal.beginTest("Enable passing of KRB5CCNAME option")
-
-	if True: # node.type == "ssh":
-		ssh_server_accept_env_options = {
-			'AcceptEnv' : 'KRB5CCNAME',
-		}
-		if not ssh_edit_config(node, "/etc/ssh/sshd_config", ssh_server_accept_env_options):
-			journal.fatal("Cannot set AcceptEnv KRB5CCNAME")
-
-	node.setenv("KRB5CCNAME", "FILE:/tmp/krb5cc_%{uid}")
-#	if not node.run("echo $KRB5CCNAME"):
-#		journal.fatal("ssh connection broken")
-	journal.success()
+	journal.beginTest("Enable persistent cred cache for testuser")
+	if not has_systemd(node):
+		journal.info("No systemd no cry")
+	elif not node.run("systemd-loginctl enable-linger testuser"):
+		journal.failure("could not enable user lingering for testuser")
 
 ##################################################################
 # Test kadmin functionality
