@@ -140,7 +140,7 @@ def init_server(node):
 	if not node.sendbuffer("/etc/kdc.conf", data):
 		journal.fatal("failed to upload kdc.conf")
 
-	krb5_upload_krb5dotconf(node)
+	init_node_common(node)
 
 	journal.beginTest("initializing database")
 	journal.info("Cleaning up from previous run")
@@ -178,21 +178,16 @@ def init_client(node):
 
 	journal.beginGroup("%s-init" % node.name, "Initialize %s node" % node.name)
 
-	krb5_upload_krb5dotconf(node)
-
-	# systemd trashes the /run/user/%{uid} directory whenever
-	# the SSH session ends. Which happens all the time, because
-	# twopence will create a new session for every command.
-	node.setenv("KRB5CCNAME", "DIR:/tmp/krb5%{uid}")
+	init_node_common(node)
 
 	journal.finishGroup()
 
 
 
 ##################################################################
-# Upload krb5.conf (same/same for kdc and clients)
+# node initializaton applied to all nodes
 ##################################################################
-def krb5_upload_krb5dotconf(node):
+def init_node_common(node):
 
 	data = '''
 [libdefaults]
@@ -214,6 +209,20 @@ def krb5_upload_krb5dotconf(node):
 	if not node.sendbuffer("/etc/krb5.conf", data):
 		journal.fatal("failed to upload krb5.conf")
 
+	# systemd trashes the /run/user/%{uid} directory whenever
+	# the SSH session ends. Which happens all the time, because
+	# twopence will create a new session for every command.
+	journal.beginTest("Enable passing of KRB5CCNAME option")
+
+	if node.type == "ssh":
+		ssh_server_accept_env_options = {
+			'AcceptEnv' : 'KRB5CCNAME',
+		}
+		if not ssh_edit_config(node, "/etc/ssh/sshd_config", ssh_server_accept_env_options):
+			journal.fatal("Cannot set AcceptEnv KRB5CCNAME")
+
+	node.setenv("KRB5CCNAME", "DIR:/tmp/krb5%{uid}")
+	journal.success()
 
 ##################################################################
 # Test kadmin functionality
@@ -399,17 +408,27 @@ def ssh_edit_config(node, filename, options, user = 'root'):
 			del words[0]
 		if words:
 			kwd = words[0]
+			del words[0]
 
 		if kwd in hide_options:
 			# We've seen this option already, do not
 			# allow another occurrence
 			continue
 
+		# Special cumulative options
+		if kwd == "AcceptEnv":
+			value = " ".join(words)
+			if value == options[kwd]:
+				# Do not set hide_options for this keyword!
+				l = "%s %s" % (kwd, value)
+				del options[kwd]
+
 		if kwd in options:
 			# Ah, we want to set this option!
 			l = "%s %s" % (kwd, options[kwd])
 			hide_options[kwd] = True
 			del options[kwd]
+
 		out.append(l)
 	
 	# If we have any options that did not exist in the config file,
