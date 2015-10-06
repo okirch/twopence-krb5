@@ -180,6 +180,11 @@ def init_client(node):
 
 	krb5_upload_krb5dotconf(node)
 
+	# systemd trashes the /run/user/%{uid} directory whenever
+	# the SSH session ends. Which happens all the time, because
+	# twopence will create a new session for every command.
+	node.setenv("KRB5CCNAME", "DIR:/tmp/krb5%{uid}")
+
 	journal.finishGroup()
 
 
