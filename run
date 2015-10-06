@@ -251,10 +251,6 @@ def krb5_test_basic(node):
 	if not krb5_create_cc(node, 'testuser', user_password):
 		journal.failure("kinit failed")
 
-	journal.beginTest("Using kinit with wrong password")
-	if krb5_create_cc(node, 'testuser', 'badpassword'):
-		journal.failure("kinit should have returned error")
-
 	# FIXME: test v5passwd
 
 	krb5_verify_cc(node, 'testuser')
@@ -266,6 +262,10 @@ def krb5_test_basic(node):
 	else:
 		journal.info("Okay, klist says it can't find the cred cache any longer")
 		journal.success()
+
+	journal.beginTest("Using kinit with wrong password")
+	if krb5_create_cc(node, 'testuser', 'badpassword'):
+		journal.failure("kinit should have returned error")
 
 	journal.finishGroup()
 
