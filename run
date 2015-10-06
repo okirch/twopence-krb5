@@ -426,6 +426,7 @@ def krb5_verify_cc(node, principal):
 	journal.beginTest("Verify that klist shows a TGT (ticket granting ticket)")
 	if not node.run("klist -s", user = principal):
 		journal.failure("No TGT - klist could not find any valid tickets")
+		journal.fatal("Ouch")
 		return False
 
 	journal.info("Okay, klist says we have a cred cache with valid ticket(s)");
@@ -513,6 +514,7 @@ class KinitSession(Chat):
 		command = "kinit"
 		if forwarding:
 			command += " -f"
+		command += " -V"
 		Chat.__init__(self, node, command, user, timeout)
 
 	def login(self, password):
