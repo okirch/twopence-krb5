@@ -214,14 +214,16 @@ def init_node_common(node):
 	# twopence will create a new session for every command.
 	journal.beginTest("Enable passing of KRB5CCNAME option")
 
-	if node.type == "ssh":
+	if True: # node.type == "ssh":
 		ssh_server_accept_env_options = {
 			'AcceptEnv' : 'KRB5CCNAME',
 		}
 		if not ssh_edit_config(node, "/etc/ssh/sshd_config", ssh_server_accept_env_options):
 			journal.fatal("Cannot set AcceptEnv KRB5CCNAME")
 
-	node.setenv("KRB5CCNAME", "DIR:/tmp/krb5%{uid}")
+	node.setenv("KRB5CCNAME", "FILE:/tmp/krb5cc_%{uid}")
+#	if not node.run("echo $KRB5CCNAME"):
+#		journal.fatal("ssh connection broken")
 	journal.success()
 
 ##################################################################
@@ -388,7 +390,7 @@ def ssh_edit_config(node, filename, options, user = 'root'):
 		journal.info("  %s = %s" % (kwd, options[kwd]))
 
 	if node.run("test -f %s" % filename, user = user):
-		data = node.recvbuffer(filename, user = user)
+		data = node.recvbuffer(filename, user = user, quiet = True)
 		if data == None:
 			return False
 	else:
@@ -401,11 +403,11 @@ def ssh_edit_config(node, filename, options, user = 'root'):
 		# I don't know of a simpler way to split by white space
 		# AND equals
 		tmp = l.lstrip("# \t").replace('=', ' ')
-		words = l.split()
+		words = tmp.split()
 
 		kwd = None
-		if words and words[0] == '#':
-			del words[0]
+		#if words and words[0] == '#':
+		#	del words[0]
 		if words:
 			kwd = words[0]
 			del words[0]
@@ -415,19 +417,32 @@ def ssh_edit_config(node, filename, options, user = 'root'):
 			# allow another occurrence
 			continue
 
-		# Special cumulative options
-		if kwd == "AcceptEnv":
-			value = " ".join(words)
-			if value == options[kwd]:
-				# Do not set hide_options for this keyword!
-				l = "%s %s" % (kwd, value)
-				del options[kwd]
-
 		if kwd in options:
-			# Ah, we want to set this option!
-			l = "%s %s" % (kwd, options[kwd])
-			hide_options[kwd] = True
-			del options[kwd]
+			value = options[kwd]
+			hide_this = True
+
+			# Special cumulative options
+			if kwd == "AcceptEnv":
+				if value in words:
+					# The requested envar is in the list of names
+					# for this AcceptEnv
+					value = " ".join(words)
+				else:
+					# This is an AcceptEnv of a different
+					# variable, just leave the line
+					# unchanged.
+					value = None
+
+				# Never set hide_options for this keyword!
+				hide_this = False
+
+			if value:
+				# Ah, we want to set this option!
+				l = "%s %s" % (kwd, options[kwd])
+				del options[kwd]
+			if hide_this:
+				# Suppress all future occurences of this keyword
+				hide_options[kwd] = True
 
 		out.append(l)
 	
@@ -437,7 +452,7 @@ def ssh_edit_config(node, filename, options, user = 'root'):
 		out.append("%s %s" % (kwd, options[kwd]))
 
 	data = "\n".join(out) + "\n"
-	return node.sendbuffer(filename, data, user = user)
+	return node.sendbuffer(filename, data, user = user, quiet = True)
 
 ##################################################################
 # Utility functions
