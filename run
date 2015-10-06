@@ -148,19 +148,24 @@ def init_server(node):
 	if not node.run("%s create -r %s -s -P %s" % (kdb5_util_cmd, realm, dbpassword)):
 		journal.fatal("failed to initialize kdc database")
 
-	journal.beginTest("Adding principal testuser/admin")
+	admin_principal = "testuser/admin@%s" % realm
+
+	journal.beginTest("Adding principal %s" % admin_principal)
 	kadmin = KadminSession(node, local = True)
-	if not kadmin.add_principal("testuser/admin", admin_password):
+	if not kadmin.add_principal(admin_principal, admin_password):
 		journal.fatal("unable to add admin principal")
 		#journal.failure("unable to add admin principal")
 	kadmin = None
 
-	acl_data = "testuser/admin@%s *" % realm
+	acl_data = "%s *" % admin_principal
 	if not node.sendbuffer("/var/lib/kerberos/krb5kdc/kadm5.acl", acl_data):
 		journal.fatal("unable to upload kadm5 acl file")
 
-	start_service(node, "krb5kdc")
-	start_service(node, "kadmind")
+	if not start_service(node, "krb5kdc"):
+		journal.fatal("Unable to start kdc service");
+
+	if not start_service(node, "kadmind"):
+		journal.fatal("Unable to start kadmind service");
 
 	journal.finishGroup()
 
@@ -258,7 +263,7 @@ def krb5_test_basic(node):
 def krb5_test_ssh():
 
 	server_hostname = "server.krb5testing.suse.de"
-	server_principal = "host/%s" % server_hostname
+	server_principal = "host/%s@%s" % (server_hostname, realm)
 
 	# These options will be set on the server in order to enable GSSAPI
 	ssh_server_gssapi_options = {
