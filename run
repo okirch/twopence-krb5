@@ -151,7 +151,8 @@ def init_server(node):
 	journal.beginTest("Adding principal testuser/admin")
 	kadmin = KadminSession(node, local = True)
 	if not kadmin.add_principal("testuser/admin", admin_password):
-		journal.failure("unable to add admin principal")
+		journal.fatal("unable to add admin principal")
+		#journal.failure("unable to add admin principal")
 	kadmin = None
 
 	acl_data = "testuser/admin@%s *" % realm
