@@ -19,7 +19,7 @@ kdc = None
 server = None
 client = None
 
-realm		= "KRB5TESTING.SUSE.DE"
+test_realm	= "KRB5TESTING.SUSE.DE"
 dbpassword	= "lalla"
 admin_password	= "imtheoperator"
 user_password	= "pocketcalculator"
@@ -145,10 +145,10 @@ def init_server(node):
 	if not node.run("rm -f /var/lib/kerberos/krb5kdc/principal*"):
 		journal.warning("Duh, unable to clean up?!")
 	kdb5_util_cmd = krb5_getpath(node, "kdb5_util")
-	if not node.run("%s create -r %s -s -P %s" % (kdb5_util_cmd, realm, dbpassword)):
+	if not node.run("%s create -r %s -s -P %s" % (kdb5_util_cmd, test_realm, dbpassword)):
 		journal.fatal("failed to initialize kdc database")
 
-	admin_principal = "testuser/admin@%s" % realm
+	admin_principal = "testuser/admin@%s" % test_realm
 
 	journal.beginTest("Adding principal %s" % admin_principal)
 	kadmin = KadminSession(node, local = True)
@@ -263,7 +263,7 @@ def krb5_test_basic(node):
 def krb5_test_ssh():
 
 	server_hostname = "server.krb5testing.suse.de"
-	server_principal = "host/%s@%s" % (server_hostname, realm)
+	server_principal = "host/%s@%s" % (server_hostname, test_realm)
 
 	# These options will be set on the server in order to enable GSSAPI
 	ssh_server_gssapi_options = {
@@ -428,7 +428,7 @@ def krb5_verify_cc(node, principal):
 	if status.code != 0:
 		journal.warning("Ignoring exit status %d from klist" % status.code)
 
-	tgtname = "krbtgt/%s@%s" % (realm, realm)
+	tgtname = "krbtgt/%s@%s" % (test_realm, test_realm)
 	if not tgtname in str(status.stdout):
 		journal.failure("No TGT - could not find %s in klist output" % tgtname)
 		return False
@@ -516,7 +516,7 @@ class KinitSession(Chat):
 class KadminSession(Chat):
 	def __init__(self, node, local = False, user = None, password = None, timeout = 60):
 		if local:
-			command = krb5_getpath(node, "kadmin.local") + " -r " + realm
+			command = krb5_getpath(node, "kadmin.local") + " -r " + test_realm
 			prompt = "kadmin.local:"
 			password = None
 		else:
