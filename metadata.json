@@ -1,0 +1,16 @@
+{
+  "name": "twopence-krb5",
+  "summary": "Test suite for kerberos5",
+  "description": "SLEnkins test suite for kerberos5 authentication protocol.",
+  "status": "ready",
+  "maintainer": ["Olaf Kirch <okirch@suse.com>"],
+  "rpm": ["twopence-krb5", "twopence-krb5-control"],
+  "arch": ["noarch"],
+  "product": "krb5",
+  "fate": null,
+  "bnc": null,
+  "updated_at": "2016-03-14 16:04:00 UTC",
+  "tags": ["slenkins"],
+  "nodes": ["kdc", "client", "server"],
+  "incompatible": []
+}
